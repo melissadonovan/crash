@@ -1,0 +1,152 @@
+At Risk on the Road
+========================================================
+An Analysis of Crash Data in New York City
+--------------------------------------------------------
+```{r loadPkgs}
+setwd("/Users/melissa/Google Drive/QMSS/EDAV/Final Project")
+require(KernSmooth)
+require(plyr)
+require(reshape2)
+require(stringr)
+```
+
+finish .rmd
+post .Rmd to github
+finish webby text
+post to web
+
+Using traffic crash data published by the NYPD from August 2011 through December 2013, the risk to pedestrians and cyclists is estimated as a spatial distribution over the city using 2-dimensional Kernel Density Estimation.
+
+First, we take the "raw" data which has been geocoded by github user talos and aggregate the data to intersections.
+
+```{r reformatData, cache=TRUE, echo=FALSE}
+crash <- read.csv("crash.csv", header=TRUE, stringsAsFactors=FALSE)
+
+intersections <- ddply(crash, .(int), summarize, 
+                      lat = mean(lat),
+                      lon = mean(lon),
+                      crashes = sum(collisions), 
+                      pplInvolved = sum(persons_involved),
+                      crashWinjury = sum(collisions_with_injuries),
+                      motoristInj = sum(motorists_injured),
+                      passengerInj = sum(passengers_injured),
+                      cyclistInj = sum(cyclists_injured),
+                      pedInj = sum(pedestr_injured),
+                      totInj = sum(total_injured),
+                      motoristKill = sum(motorists_killed),
+                      passengerKill = sum(passengers_killed),
+                      cyclistKill = sum(cyclists_killed),
+                      pedKill = sum(pedestr_killed),
+                      totKill = sum(total_killed))
+#                       backingUnsafe = sum(backing_unsafely, na.rm=TRUE),
+#                       inexperience = sum(driver_inexperience, na.rm=TRUE),
+#                       failureToYield = sum(failure_to_yield_right_of_way, na.rm=TRUE),
+#                       followingClose = sum(following_too_closely, na.rm=TRUE),
+#                       passing = sum(passing_or_lane_usage, na.rm=TRUE),
+#                       laneChange = sum(unsafe_lane_changing, na.rm=TRUE),
+#                       bus = sum(bus, na.rm=TRUE),
+#                       passengerVeh = sum(passenger_vehicle, na.rm=TRUE),
+#                       SUV = sum(sport_utility_station_wagon, na.rm=TRUE),
+#                       van = sum(van, na.rm=TRUE),
+#                       taxi = sum(taxi_vehicle, na.rm=TRUE),
+#                       livery = sum(livery_vehicle, na.rm=TRUE))
+
+# turn intersections back into lat and lon
+intersections$lat <- gsub(pattern="\\,.+", replacement="", intersections$int)
+intersections$lon <- gsub(pattern=".*,", replacement="", intersections$int)
+```
+
+Below we see the total number of pedestrians injured or killed, cyclists injured or killed, and motorists injured or killed.
+
+```{r descriptiveStats}
+sum(intersections$pedInj) + sum(intersections$pedKill)
+sum(intersections$cyclistInj) + sum(intersections$cyclistKill)
+sum(intersections$motoristInj + intersections$motoristKill)
+```
+
+Next, we define a couple of functions we will need to create the KDE.  The first takes lat/lon pairs in a data frame and repeats each pair in a new data frame a number of times given by the value in the count vector.  The second tidies up this data by removing points more than 3 standard deviations away from the mean and then runs the 2D KDE over the remaining data.  
+
+
+```{r KDEfunctions, echo=FALSE}
+#pass in only lat/lon as the df and count is the vector with number of times to repeat the lat/lon
+
+# This function creates a new data frame with each row of 'df' repeated the number of times specified by the vector 'count'
+onePerRow <- function(df, count){
+  if (nrow(df) == length(count)){
+    return( df[ rep( seq_len(nrow(df)), count), ] )
+  } else {
+    stop("Error: length of count must equal number of rows in df")
+  }
+}
+
+# This function creates a 2D KDE based on the df, which should just be 2 columns of lat/lon pairs, the vector count shows how many instances are associated with each lat/lon pair, the band is the KDE bandwidth, and grid is the grid spacing.  Returns the full KDE object
+densityMapper <- function (df, count, band=c(0.0012, 0.001296), grid=c(250,250)){
+  oneInstPerRow <- onePerRow(df, count) 
+  oneInstPerRow[,1] <- as.numeric(oneInstPerRow[,1])
+  oneInstPerRow[,2] <- as.numeric(oneInstPerRow[,2])
+  #remove rows that fall outside of 3 sd's of the mean lat and lon
+  oneInstPerRow <- oneInstPerRow[!is.na(oneInstPerRow[,1]),]
+  oneInstPerRow <- oneInstPerRow[!is.na(oneInstPerRow[,2]),]
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,1] != 0,]
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,2] != 0,]
+  oneInstPerRow <- as.data.frame(oneInstPerRow)
+  geoMean <- apply(oneInstPerRow, MARGIN=2, FUN="mean")
+  geoSds <- apply(oneInstPerRow, MARGIN=2, FUN=sd)
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,1] > (geoMean[1]-3*geoSds[1]),] 
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,1] < (geoMean[1]+3*geoSds[1]),] 
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,2] > (geoMean[2]-3*geoSds[2]),] 
+  oneInstPerRow <- oneInstPerRow[oneInstPerRow[,2] < (geoMean[2]+3*geoSds[2]),]
+  est <- bkde2D(oneInstPerRow, bandwidth=band, gridsize=grid)
+}
+```
+
+Finally we will construct the KDE for pedestrians, another for cyclists, and a final one for motorists.  The instances of injury and death are lumped together.  The output is a csv of lat/lon pairs that have an associated value equal to the number of estimated injuries or deaths to the road user type in that location in one year.  We check out contour maps for each as a sanity check that this is producing the desired output.  
+
+*Warning: this code will write csv's to the working directory!*
+
+```{r pedestrianKDE, echo=FALSE,warning=FALSE}
+pedestrian <- densityMapper(intersections[,c(2:3)], (intersections$pedInj + intersections$pedKill))
+contour(pedestrian$x1, pedestrian$x2, pedestrian$fhat)
+pedestrianKDE <- as.data.frame(pedestrian$fhat)
+names(pedestrianKDE) <- pedestrian$x2
+row.names(pedestrianKDE) <- pedestrian$x1
+pedKDEmelt <- melt(as.matrix(pedestrianKDE))
+names(pedKDEmelt) <- c("lon","lat","value")
+scalePed <- (sum(intersections$pedInj) + sum(intersections$pedKill))/sum(pedKDEmelt$value)
+pedKDEmelt$value <- pedKDEmelt$value * scalePed
+pedKDEmelt$value <- pedKDEmelt$value * (12/29)
+pedKDEsmall <- pedKDEmelt[pedKDEmelt$value > 0.5,]
+names(pedKDEsmall) <- c("latitude","longitude","value")
+pedKDEsmall$value <- round(pedKDEsmall$value, 2)
+write.csv(pedKDEsmall, file="pedestrianDensity.csv",row.names=FALSE)
+
+cyclist <- densityMapper(intersections[,c(2:3)], (intersections$cyclistInj + intersections$cyclistKill))
+contour(cyclist$x1, cyclist$x2, cyclist$fhat)
+cycleKDE <- as.data.frame(cyclist$fhat)
+names(cycleKDE) <- cyclist$x2
+row.names(cycleKDE) <- cyclist$x1
+cycleKDEmelt <- melt(as.matrix(cycleKDE))
+names(cycleKDEmelt) <- c("latitude", "longitude", "value")
+scaleCycle <- (sum(intersections$cyclistInj) + sum(intersections$cyclistKill)) / sum(cycleKDEmelt$value)
+cycleKDEmelt$value <- cycleKDEmelt$value * scaleCycle
+cycleKDEmelt$value <- cycleKDEmelt$value * (12/29)
+cycleKDEsmall <- cycleKDEmelt[cycleKDEmelt$value > 0.25,]
+names(cycleKDEsmall) <- c("latitude", "longitude", "value")
+cycleKDEsmall$value <- round(cycleKDEsmall$value, 2)
+write.csv(cycleKDEsmall, file="cycleDensity.csv", row.names=FALSE)
+
+cars <- densityMapper(intersections[,c(2:3)], (intersections$motoristInj + intersections$motoristKill), band=c(0.0014, 0.00149), grid=c(250,250))
+contour(cars$x1, cars$x2, cars$fhat)
+carKDE <- as.data.frame(cars$fhat)
+names(carKDE) <- cars$x2
+row.names(carKDE) <- cars$x1
+carKDEmelt <- melt(as.matrix(carKDE))
+names(carKDEmelt) <- c("latitude", "longitude", "value")
+scaleCar <- (sum(intersections$motoristInj + intersections$motoristKill)) / sum(carKDEmelt$value)
+carKDEmelt$value <- carKDEmelt$value * scaleCar
+carKDEmelt$value <- carKDEmelt$value * (12/29)
+carKDEsmall <- carKDEmelt[carKDEmelt$value > 0.5,]
+names(carKDEsmall) <- c("latitude", "longitude", "value")
+carKDEsmall$value <- round(carKDEsmall$value, 2)
+write.csv(carKDEsmall, file="carDensity.csv", row.names=FALSE)
+```
